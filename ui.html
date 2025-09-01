@@ -8,9 +8,10 @@
     :root { --bg:#fff; --txt:#222; --muted:#727272; --primary:#2f87b7; --border:#d9d9d9; }
     *{ box-sizing: border-box; }
     body{ margin:0; font-family: Inter, ui-sans-serif, system-ui; background:var(--bg); color:var(--txt); }
-    .wrapper{ width:100%; height:100%; padding:16px; display: flex; flex-direction: column; }
-    .label{ font-weight:600; margin:4px 0 8px; }
-    .input{ width:100%; padding:12px 14px; border:1px solid var(--border); border-radius:10px; outline:none; font-size:14px; }
+    .wrapper{ width:100%; height:100vh; padding:16px; display: flex; flex-direction: column; }
+    .label{ font-weight:600; margin:4px 0 8px; font-size: 13px; }
+    .input, textarea{ width:100%; padding:10px 14px; border:1px solid var(--border); border-radius:10px; outline:none; font-size:14px; font-family: inherit; }
+    textarea { resize: vertical; }
     .row{ display:flex; align-items:center; gap:10px; margin-top:8px; margin-bottom: 20px; }
     .toggle{ width:40px; height:24px; border-radius:999px; background:#e9e9e9; position:relative; cursor:pointer; flex:0 0 auto;  }
     .toggle[data-on="true"]{ background:#d6eefb; }
@@ -22,28 +23,46 @@
     .chip{ padding:6px 8px; border:1px solid var(--border); border-radius:8px; font-size:12px; color:#555; }
     .stack{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
     .hint{ font-size:12px; color:var(--muted); margin-top: auto; padding-top: 16px; line-height:1.3; }
+    #docs-fields {
+        display: none;
+        margin-top: -10px;
+        margin-bottom: 20px;
+        border-top: 1px solid var(--border);
+        padding-top: 16px;
+    }
   </style>
 </head>
 <body>
   <div class="wrapper">
-    <div class="label">Name</div>
-    <input id="obj-name" class="input" placeholder="Name component" />
+    <div class="label">Component Name</div>
+    <input id="obj-name" class="input" placeholder="E.g., Button, Input Field" />
 
     <div class="row">
       <div id="use-layer-name" class="toggle" data-on="false"><div class="knob"></div></div>
-      <div class="muted">Use layer name to variant</div>
+      <div class="muted">Use layer name for variants</div>
     </div>
 
     <div class="row" style="margin-bottom: 10px;">
         <div id="make-box" class="toggle" data-on="false"><div class="knob"></div></div>
-        <div class="muted">Make box</div>
+        <div class="muted">Generate documentation</div>
+    </div>
+    
+    <div id="docs-fields">
+        <div class="label" style="margin-top:0;">Description</div>
+        <textarea id="doc-description" class="input" rows="2" placeholder="What is this component for?"></textarea>
+
+        <div class="label" style="margin-top:12px;">Location</div>
+        <textarea id="doc-location" class="input" rows="2" placeholder="Where should this be used?"></textarea>
+        
+        <div class="label" style="margin-top:12px;">Behavior</div>
+        <textarea id="doc-behavior" class="input" rows="2" placeholder="How does it interact?"></textarea>
     </div>
 
-    <button id="btn-create-set" class="btn">Create component set</button>
-    <button id="btn-create-master" class="btn secondary">Create master component</button>
+    <button id="btn-create-set" class="btn">Create Component Set</button>
+    <button id="btn-create-master" class="btn secondary">Create Master Component</button>
 
     <div class="stack" id="sel-info" style="margin-top:10px;"></div>
-    <div class="hint">Select 2 or more objects to create variants. The plugin maintains position and properties when replacing.</div>
+    <div class="hint">Select 2+ objects to create variants. The plugin maintains position when replacing instances.</div>
   </div>
 
   <script>
@@ -57,20 +76,34 @@
       });
     });
 
-    $('#btn-create-set').onclick = ()=>{
-      parent.postMessage({ pluginMessage:{
-        type:'create-component-set',
+    // Lógica específica para o toggle de documentação
+    const makeBoxToggle = $('#make-box');
+    const docsFields = $('#docs-fields');
+    makeBoxToggle.addEventListener('click', () => {
+        const on = makeBoxToggle.getAttribute('data-on') === 'true'; // já foi invertido pelo listener acima
+        docsFields.style.display = on ? 'block' : 'none';
+        // Redimensiona a janela do plugin para acomodar os novos campos
+        parent.postMessage({ pluginMessage: { type: 'resize', height: on ? 640 : 440 }}, '*');
+    });
+
+    const getPluginMessage = (type) => ({
+      pluginMessage:{
+        type,
         name: $('#obj-name').value.trim(),
         useLayerName: $('#use-layer-name').getAttribute('data-on') === 'true',
-        makeBox: $('#make-box').getAttribute('data-on') === 'true' // <-- NOVO VALOR
-      }}, '*');
+        makeBox: $('#make-box').getAttribute('data-on') === 'true',
+        // --- NOVOS DADOS ---
+        description: $('#doc-description').value.trim(),
+        location: $('#doc-location').value.trim(),
+        behavior: $('#doc-behavior').value.trim()
+      }
+    });
+
+    $('#btn-create-set').onclick = ()=>{
+      parent.postMessage(getPluginMessage('create-component-set'), '*');
     };
     $('#btn-create-master').onclick = ()=>{
-      parent.postMessage({ pluginMessage:{
-        type:'create-master-component',
-        name: $('#obj-name').value.trim(),
-        makeBox: $('#make-box').getAttribute('data-on') === 'true' // <-- NOVO VALOR
-      }}, '*');
+      parent.postMessage(getPluginMessage('create-master-component'), '*');
     };
 
     onmessage = (event)=>{
