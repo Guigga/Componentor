@@ -14,7 +14,7 @@ const PADDING_LABEL_BG: SolidPaint = { type: 'SOLID', color: { r: 1, g: 194 / 25
 const GAP_LABEL_BG: SolidPaint = { type: 'SOLID', color: { r: 122 / 255, g: 97 / 255, b: 1 }, opacity: 0.5 }; // #7A61FF 50%
 
 const LABEL_TEXT_FILL: SolidPaint = { type: 'SOLID', color: { r: 45 / 255, g: 45 / 255, b: 45 / 255 } };
-const CONTAINER_BG_FILL: SolidPaint = { type: 'SOLID', color: { r: 243 / 255, g: 243 / 255, b: 243 / 255 } };
+const CONTAINER_BG_FILL: SolidPaint = { type: 'SOLID', color: { r: 232 / 255, g: 232 / 255, b: 232 / 255 } };
 
 // --- NOVAS CONSTANTES PARA POSICIONAMENTO ---
 const LINE_EXTENSION = 6; // Quanto a linha sobressai
