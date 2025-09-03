@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Componentor</title>
   <style>
-    :root { --bg:#fff; --txt:#222; --muted:#727272; --primary:#2f87b7; --border:#d9d9d9; }
+    :root { --bg:#fff; --txt:#222; --muted:#727272; --primary:#4894C4; --border:#d9d9d9; }
     *{ box-sizing: border-box; }
     body{ margin:0; font-family: Inter, ui-sans-serif, system-ui; background:var(--bg); color:var(--txt); }
     .wrapper{ width:100%; height:100vh; padding:16px; display: flex; flex-direction: column; }
@@ -18,17 +18,74 @@
     .toggle .knob{ width:18px; height:18px; border-radius:50%; background:#fff; position:absolute; top:3px; left:3px; transition:all .16s ease; box-shadow:0 1px 2px rgba(0,0,0,.15); }
     .toggle[data-on="true"] .knob{ left:19px; }
     .muted{ color:var(--muted); font-size:13px; }
-    .btn{ width:100%; padding:16px 14px; border-radius:14px; border:1px solid var(--primary); background:var(--primary); color:#fff; font-weight:700; font-size:16px; cursor:pointer; margin-top:8px; }
-    .btn.secondary{ background:#fff; color:var(--primary); border:2px solid var(--primary); }
     .chip{ padding:6px 8px; border:1px solid var(--border); border-radius:8px; font-size:12px; color:#555; }
     .stack{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
-    .hint{ font-size:12px; color:var(--muted); margin-top: auto; padding-top: 16px; line-height:1.3; }
     #docs-fields {
         display: none;
         margin-top: -10px;
         margin-bottom: 20px;
         border-top: 1px solid var(--border);
         padding-top: 16px;
+    }
+
+    /* --- ESTILOS DO RODAPÉ --- */
+    .footer {
+      margin-top: auto; /* Empurra todo o rodapé para baixo */
+    }
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      padding-top: 8px;
+      line-height: 1.3;
+    }
+    .watermark {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      padding-top: 12px;
+      opacity: 0.9;
+    }
+    /* Estilo para o link da marca d'água */
+    .watermark a {
+      color: inherit; /* Herda a cor cinza do pai */
+      text-decoration: none; /* Remove o sublinhado padrão */
+    }
+    .watermark a:hover {
+      text-decoration: underline; /* Adiciona sublinhado ao passar o mouse */
+    }
+    /* -------------------------- */
+
+    /* --- ESTILOS DOS BOTÕES --- */
+    .btn{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      height: 52px;
+      margin-top: 8px;
+      padding: 0 20px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600; /* Semi Bold */
+      cursor: pointer;
+      flex-shrink: 0; 
+      
+      background: var(--primary);
+      color: #fff;
+      border: none;
+    }
+    .btn.secondary{
+      background: var(--bg);
+      color: var(--primary);
+      border: 2px solid var(--primary);
+      height: 51px;
+    }
+    .btn svg, .btn span {
+      display: block; 
+    }
+    .btn svg {
+      flex-shrink: 0; 
     }
   </style>
 </head>
@@ -37,12 +94,12 @@
     <div class="label">Component Name</div>
     <input id="obj-name" class="input" placeholder="E.g., Button, Input Field" />
 
-    <div class="row">
+    <div class="row" style="margin-bottom: 0px;"> 
       <div id="use-layer-name" class="toggle" data-on="false"><div class="knob"></div></div>
       <div class="muted">Use layer name for variants</div>
     </div>
 
-    <div class="row" style="margin-bottom: 10px;">
+    <div class="row" style="margin-bottom: 24px;">
         <div id="make-box" class="toggle" data-on="false"><div class="knob"></div></div>
         <div class="muted">Generate documentation</div>
     </div>
@@ -58,11 +115,46 @@
         <textarea id="doc-behavior" class="input" rows="2" placeholder="How does it interact?"></textarea>
     </div>
 
-    <button id="btn-create-set" class="btn">Create Component Set</button>
-    <button id="btn-create-master" class="btn secondary">Create Master Component</button>
-
+    <button id="btn-create-set" class="btn">
+      <svg width="19" height="18" viewBox="0 0 19 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M4.71777 16.9238C4.9698 16.9737 5.23158 17 5.5 17H6.5V18H5.5C5.16605 18 4.84004 17.9658 4.52441 17.9033L4.71777 16.9238Z" fill="white"/>
+          <path d="M10.5 18H8.5V17H10.5V18Z" fill="white"/>
+          <path d="M14.3789 17.4141L14.4746 17.9033C14.2407 17.9496 14.0012 17.9808 13.7568 17.9932L13.5 18H12.5V17H13.5C13.7684 17 14.0302 16.9737 14.2822 16.9238L14.3789 17.4141Z" fill="white"/>
+          <path d="M2.17285 15.2217C2.46517 15.6583 2.84168 16.0348 3.27832 16.3271L2.72168 17.1572C2.17639 16.7921 1.7068 16.3227 1.3418 15.7773L2.17285 15.2217Z" fill="white"/>
+          <path d="M17.6572 15.7773C17.2921 16.3228 16.8228 16.7921 16.2773 17.1572L15.7217 16.3271C16.1583 16.0348 16.5348 15.6583 16.8271 15.2217L17.6572 15.7773Z" fill="white"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M9.22461 10.416C9.41865 10.2877 9.68256 10.3087 9.85352 10.4795L11.6865 12.3135C11.8818 12.5087 11.8818 12.8252 11.6865 13.0205L9.85352 14.8535C9.65825 15.0488 9.34175 15.0488 9.14648 14.8535L7.31348 13.0205C7.11821 12.8252 7.11821 12.5087 7.31348 12.3135L9.14648 10.4795L9.22461 10.416ZM8.37305 12.666L9.5 13.793L10.626 12.666L9.5 11.54L8.37305 12.666Z" fill="white"/>
+          <path d="M1.5 13C1.5 13.2684 1.52631 13.5302 1.57617 13.7822L1.08496 13.8779L0.595703 13.9746C0.549493 13.7408 0.5192 13.5012 0.506836 13.2568L0.5 13V12H1.5V13Z" fill="white"/>
+          <path d="M18.5 13L18.4932 13.2568C18.4808 13.5012 18.4496 13.7407 18.4033 13.9746L17.9141 13.8789L17.4238 13.7822C17.4737 13.5302 17.5 13.2684 17.5 13V12H18.5V13Z" fill="white"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M5.55859 6.74902C5.75264 6.62108 6.01575 6.6427 6.18652 6.81348L8.02051 8.64648C8.21555 8.84171 8.21555 9.15829 8.02051 9.35352L6.18652 11.1865C5.99126 11.3818 5.67475 11.3818 5.47949 11.1865L3.64648 9.35352C3.45122 9.15825 3.45122 8.84175 3.64648 8.64648L5.47949 6.81348L5.55859 6.74902ZM4.70703 9L5.83301 10.126L6.95898 9L5.83301 7.87305L4.70703 9Z" fill="white"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M12.8916 6.74902C13.0857 6.62092 13.3497 6.64264 13.5205 6.81348L15.3535 8.64648C15.5488 8.84175 15.5488 9.15825 15.3535 9.35352L13.5205 11.1865C13.3252 11.3818 13.0087 11.3818 12.8135 11.1865L10.9795 9.35352C10.7844 9.15829 10.7844 8.84171 10.9795 8.64648L12.8135 6.81348L12.8916 6.74902ZM12.04 9L13.166 10.126L14.293 9L13.166 7.87305L12.04 9Z" fill="white"/>
+          <path d="M1.5 10H0.5V8H1.5V10Z" fill="white"/>
+          <path d="M18.5 10H17.5V8H18.5V10Z" fill="white"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M9.22461 3.08203C9.41869 2.95387 9.68265 2.97562 9.85352 3.14648L11.6865 4.97949C11.8818 5.17475 11.8818 5.49126 11.6865 5.68652L9.85352 7.52051C9.65829 7.71555 9.34171 7.71555 9.14648 7.52051L7.31348 5.68652C7.11821 5.49126 7.11821 5.17475 7.31348 4.97949L9.14648 3.14648L9.22461 3.08203ZM8.37305 5.33301L9.5 6.45898L10.626 5.33301L9.5 4.20703L8.37305 5.33301Z" fill="white"/>
+          <path d="M1.57617 4.21777C1.52631 4.4698 1.5 4.73158 1.5 5V6H0.5V5C0.5 4.66611 0.533282 4.33998 0.595703 4.02441L1.57617 4.21777Z" fill="white"/>
+          <path d="M18.4033 4.02441C18.4658 4.34004 18.5 4.66605 18.5 5V6H17.5V5C17.5 4.73158 17.4737 4.4698 17.4238 4.21777L18.4033 4.02441Z" fill="white"/>
+          <path d="M3.27832 1.67285C2.84168 1.96517 2.46517 2.34168 2.17285 2.77832L1.3418 2.22168C1.70684 1.67642 2.17642 1.20684 2.72168 0.841797L3.27832 1.67285Z" fill="white"/>
+          <path d="M16.2773 0.841797C16.8227 1.2068 17.2921 1.67639 17.6572 2.22168L16.8271 2.77832C16.5348 2.34168 16.1583 1.96517 15.7217 1.67285L16.2773 0.841797Z" fill="white"/>
+          <path d="M6.5 1H5.5C5.23158 1 4.9698 1.02631 4.71777 1.07617L4.62012 0.583008L4.52441 0.0957031C4.83998 0.0332823 5.16611 1.55795e-08 5.5 0H6.5V1Z" fill="white"/>
+          <path d="M13.7568 0.00683594C14.0012 0.0191999 14.2408 0.0494928 14.4746 0.0957031L14.3799 0.583008L14.2822 1.07617C14.0302 1.02631 13.7684 1 13.5 1H12.5V0H13.5L13.7568 0.00683594Z" fill="white"/>
+          <path d="M10.5 1H8.5V0H10.5V1Z" fill="white"/>
+      </svg>
+      <span>Create Component Set</span>
+    </button>
+    <button id="btn-create-master" class="btn secondary">
+      <svg width="19" height="19" viewBox="0 0 19 19" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9.5 1.5L12.1667 4.16667L9.5 6.83333L6.83333 4.16667L9.5 1.5ZM9.5 12.1667L12.1667 14.8333L9.5 17.5L6.83333 14.8333L9.5 12.1667ZM14.8333 6.83333L17.5 9.5L14.8333 12.1667L12.1667 9.5L14.8333 6.83333ZM4.16667 6.83333L6.83333 9.5L4.16667 12.1667L1.5 9.5L4.16667 6.83333Z" stroke="#4894C4" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+      <span>Create Master Component</span>
+    </button>
+    
     <div class="stack" id="sel-info" style="margin-top:10px;"></div>
-    <div class="hint">Select 2+ objects to create variants. The plugin maintains position when replacing instances.</div>
+    
+    <div class="footer">
+      <div class="hint">Select 2+ objects to create variants. The plugin maintains position when replacing instances.</div>
+      <div class="watermark">
+        <a href="https://www.guigga.com.br" target="_blank">Created by Guigga</a>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -92,7 +184,6 @@
         name: $('#obj-name').value.trim(),
         useLayerName: $('#use-layer-name').getAttribute('data-on') === 'true',
         makeBox: $('#make-box').getAttribute('data-on') === 'true',
-        // --- NOVOS DADOS ---
         description: $('#doc-description').value.trim(),
         location: $('#doc-location').value.trim(),
         behavior: $('#doc-behavior').value.trim()

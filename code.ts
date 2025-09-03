@@ -25,6 +25,7 @@ const LABEL_MARGIN = 2; // Distância do rótulo para a linha
 // ===== FUNÇÕES AUXILIARES =====
 // =================================================================
 
+
 async function createDocumentationSection(title: string, content: string): Promise<FrameNode | null> {
     if (!content || content.trim() === '') {
         return null;
@@ -389,6 +390,15 @@ function rgbToHex(r: number, g: number, b: number): string {
     return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
 }
 
+function getAngleFromTransform(transform: [[number, number, number], [number, number, number]]): number {
+    const [a, b] = transform[0];
+    const angleRad = Math.atan2(b, a);
+    const angleDeg = angleRad * (180 / Math.PI);
+    // Adiciona 90 graus para alinhar com a convenção de CSS (0deg = de baixo para cima)
+    // Se preferir 0deg = da esquerda para a direita, remova o "+ 90"
+    return (angleDeg + 90) % 360;
+}
+
 // =================================================================
 // ===== FUNÇÃO DE VISUALIZAÇÃO (CORRIGIDA E REFATORADA) =====
 // =================================================================
@@ -520,37 +530,66 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
 
     // --- LÓGICA DE GAPS ---
 
-    if ('children' in componentPiece && componentPiece.children.length > 1 && componentPiece.itemSpacing > 0) {
-        for (let i = 0; i < componentPiece.children.length - 1; i++) {
-            const currentChild = componentPiece.children[i];
-            if (!('relativeTransform' in currentChild)) continue;
+    if ('children' in componentPiece && componentPiece.children.length > 1) {
+        let actualItemSpacing = componentPiece.itemSpacing;
 
-            const gapBlock = figma.createRectangle();
-            gapBlock.fills = [GAP_FILL];
-            const childRelativeX = currentChild.relativeTransform[0][2];
-            const childRelativeY = currentChild.relativeTransform[1][2];
+        // Se o alinhamento for Space Between, precisamos calcular o espaçamento real
+        if (componentPiece.primaryAxisAlignItems === 'SPACE_BETWEEN') {
+            const children = componentPiece.children;
+            const numGaps = children.length - 1;
 
-            if (componentPiece.layoutMode === 'HORIZONTAL') { // Gap Vertical
-                const gapHeight = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
-                gapBlock.resize(componentPiece.itemSpacing, gapHeight);
-                gapBlock.x = componentPiece.x + childRelativeX + currentChild.width;
-                gapBlock.y = componentPiece.y + componentPiece.paddingTop;
-                
-                const labelAnchor = { x: gapBlock.x + gapBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
-                const label = await createLabel(componentPiece.itemSpacing, labelAnchor, 'gap', 'top');
-                vizElements.push(gapBlock, ...createVerticalBoundaryLines(gapBlock, GAP_LINE_STROKE), label);
+            if (numGaps > 0) {
+                if (componentPiece.layoutMode === 'HORIZONTAL') {
+                    const containerWidth = componentPiece.width - componentPiece.paddingLeft - componentPiece.paddingRight;
+                    const totalChildrenWidth = children.reduce((sum, child) => sum + child.width, 0);
+                    const totalGapSpace = containerWidth - totalChildrenWidth;
+                    actualItemSpacing = totalGapSpace / numGaps;
+                } else { // VERTICAL
+                    const containerHeight = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
+                    const totalChildrenHeight = children.reduce((sum, child) => sum + child.height, 0);
+                    const totalGapSpace = containerHeight - totalChildrenHeight;
+                    actualItemSpacing = totalGapSpace / numGaps;
+                }
+            }
+        }
+        
+        // Continua apenas se houver um espaçamento real para desenhar
+        if (actualItemSpacing > 0) {
+            for (let i = 0; i < componentPiece.children.length - 1; i++) {
+                const currentChild = componentPiece.children[i];
+                if (!('relativeTransform' in currentChild)) continue;
 
-            } else { // layoutMode === 'VERTICAL' -> Gap Horizontal
-                const gapWidth = componentPiece.width - componentPiece.paddingLeft - componentPiece.paddingRight;
-                gapBlock.resize(gapWidth, componentPiece.itemSpacing);
-                gapBlock.x = componentPiece.x + componentPiece.paddingLeft;
-                gapBlock.y = componentPiece.y + childRelativeY + currentChild.height;
+                const gapBlock = figma.createRectangle();
+                gapBlock.fills = [GAP_FILL];
+                const childRelativeX = currentChild.relativeTransform[0][2];
+                const childRelativeY = currentChild.relativeTransform[1][2];
 
-                const line1 = createFullWidthHorizontalLine(gapBlock.y, GAP_LINE_STROKE);
-                const line2 = createFullWidthHorizontalLine(gapBlock.y + gapBlock.height, GAP_LINE_STROKE);
-                const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: gapBlock.y + gapBlock.height / 2 };
-                const label = await createLabel(componentPiece.itemSpacing, labelAnchor, 'gap', 'left');
-                vizElements.push(gapBlock, line1, line2, label);
+                if (componentPiece.layoutMode === 'HORIZONTAL') { // Gap Vertical
+                    const gapHeight = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
+                    // USA O VALOR CORRIGIDO
+                    gapBlock.resize(actualItemSpacing, gapHeight);
+                    gapBlock.x = componentPiece.x + childRelativeX + currentChild.width;
+                    gapBlock.y = componentPiece.y + componentPiece.paddingTop;
+                    
+                    const labelAnchor = { x: gapBlock.x + gapBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
+                    // USA O VALOR CORRIGIDO
+                    const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'top');
+                    vizElements.push(gapBlock, ...createVerticalBoundaryLines(gapBlock, GAP_LINE_STROKE), label);
+
+                } else { // layoutMode === 'VERTICAL' -> Gap Horizontal
+                    const gapWidth = componentPiece.width - componentPiece.paddingLeft - componentPiece.paddingRight;
+                    // USA O VALOR CORRIGIDO
+                    gapBlock.resize(gapWidth, actualItemSpacing);
+                    gapBlock.x = componentPiece.x + componentPiece.paddingLeft;
+                    gapBlock.y = componentPiece.y + childRelativeY + currentChild.height;
+
+                    const line1 = createFullWidthHorizontalLine(gapBlock.y, GAP_LINE_STROKE);
+                    const line2 = createFullWidthHorizontalLine(gapBlock.y + gapBlock.height, GAP_LINE_STROKE);
+                    const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: gapBlock.y + gapBlock.height / 2 };
+                    // USA O VALOR CORRIGIDO
+                    const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'left');
+                    vizElements.push(gapBlock, line1, line2, label);
+                }
             }
         }
     }
@@ -601,10 +640,40 @@ async function createPropertiesFrame(node: ComponentNode | FrameNode): Promise<F
     frame.appendChild(createText(heightText));
     frame.appendChild(createText(widthText));
 
-    if ('fills' in node && Array.isArray(node.fills) && node.fills.length > 0 && node.fills[0].type === 'SOLID') {
-        const colorInfo = await getColorInfo(node.fills[0], node.fillStyleId);
-        const label = colorInfo.name ? `${colorInfo.name} (${colorInfo.hex})` : colorInfo.hex;
-        frame.appendChild(createText(`Background color: ${label}`));
+    if ('fills' in node && Array.isArray(node.fills) && node.fills.length > 0) {
+        const firstFill = node.fills[0];
+        let backgroundLabel = '';
+
+        switch (firstFill.type) {
+            case 'SOLID': {
+                const colorInfo = await getColorInfo(firstFill, node.fillStyleId);
+                const label = colorInfo.name ? `${colorInfo.name} (${colorInfo.hex})` : colorInfo.hex;
+                backgroundLabel = `Background color: ${label}`;
+                break;
+            }
+            case 'GRADIENT_LINEAR': {
+                // Usa a nova função para obter o ângulo
+                const angle = getAngleFromTransform(firstFill.gradientTransform).toFixed(1);
+
+                // Mapeia cada "stop" de cor para uma string legível
+                const colorStops = firstFill.gradientStops.map((stop: ColorStop) => {
+                    const hex = rgbToHex(stop.color.r, stop.color.g, stop.color.b);
+                    const position = Math.round(stop.position * 100);
+                    return `${hex} em ${position}%`;
+                }).join(', ');
+                
+                backgroundLabel = `Background: Linear Gradient ${angle}°, ${colorStops}`;
+                break;
+            }
+            // Você pode adicionar outros casos aqui (GRADIENT_RADIAL, IMAGE, etc.) no futuro
+            default:
+                backgroundLabel = `Background: ${firstFill.type} (não documentado)`;
+                break;
+        }
+
+        if (backgroundLabel) {
+            frame.appendChild(createText(backgroundLabel));
+        }
     }
     if ('strokes' in node && Array.isArray(node.strokes) && node.strokes.length > 0 && node.strokes[0].type === 'SOLID') {
         const colorInfo = await getColorInfo(node.strokes[0], node.strokeStyleId);
@@ -652,7 +721,11 @@ async function createSpacingFrame(node: ComponentNode | FrameNode): Promise<Fram
     frame.appendChild(createText(`Alignment: ${alignmentText}`));
     if ('layoutSizingVertical' in node) frame.appendChild(createText(`Vertical resizing: ${resizeMap[node.layoutSizingVertical]}`));
     if ('layoutSizingHorizontal' in node) frame.appendChild(createText(`Horizontal resizing: ${resizeMap[node.layoutSizingHorizontal]}`));
-    frame.appendChild(createText(`Item spacing: ${node.itemSpacing}`));
+    if (node.primaryAxisAlignItems === 'SPACE_BETWEEN') {
+    frame.appendChild(createText(`Item spacing: Auto (Space Between)`));
+    } else {
+        frame.appendChild(createText(`Item spacing: ${node.itemSpacing}`));
+    }
     const { paddingTop, paddingRight, paddingBottom, paddingLeft } = node;
     if (paddingTop === paddingRight && paddingTop === paddingBottom && paddingTop === paddingLeft) {
         frame.appendChild(createText(`Padding: ${paddingTop}`));
@@ -660,6 +733,231 @@ async function createSpacingFrame(node: ComponentNode | FrameNode): Promise<Fram
         frame.appendChild(createText(`Padding T/R/B/L: ${paddingTop}/${paddingRight}/${paddingBottom}/${paddingLeft}`));
     }
     return frame;
+}
+
+/**
+ * Cria um frame de documentação para as proporções dos itens filhos,
+ * exibindo suas porcentagens de tamanho apenas quando for contextualmente relevante.
+ */
+async function createProportionsFrame(node: FrameNode | ComponentNode | InstanceNode): Promise<FrameNode | null> {
+    // 1. Verifica se o nó tem Auto Layout e filhos para analisar.
+    if (!('layoutMode' in node) || node.layoutMode === 'NONE' || !node.children || node.children.length === 0) {
+        return null;
+    }
+
+    // Carrega a fonte necessária para os textos da documentação.
+    await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+    await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+
+    // 2. Cria o contêiner principal para esta seção da documentação.
+    const frame = figma.createFrame();
+    frame.name = "Proportions";
+    frame.layoutMode = "VERTICAL";
+    frame.primaryAxisSizingMode = "AUTO";
+    frame.counterAxisSizingMode = "AUTO";
+    frame.itemSpacing = 8;
+    frame.paddingTop = 16;
+    frame.paddingBottom = 16;
+    frame.paddingLeft = 16;
+    frame.paddingRight = 16;
+    frame.fills = [];
+
+    const createText = (content: string, isBold = false) => {
+        const text = figma.createText();
+        text.fontName = { family: "Inter", style: isBold ? "Bold" : "Regular" };
+        text.characters = content;
+        text.fontSize = 12;
+        return text;
+    };
+
+    frame.appendChild(createText("Item Proportions", true));
+
+    const isHorizontal = node.layoutMode === 'HORIZONTAL';
+    const parentSizingMode = isHorizontal ? node.layoutSizingHorizontal : node.layoutSizingVertical;
+
+    // 3. Lógica principal: Verifica se o pai tem tamanho dinâmico ('Hug').
+    // Se tiver, as porcentagens não são estáveis e não devem ser mostradas.
+    if (parentSizingMode === 'HUG') {
+        frame.appendChild(createText("Parent size is dynamic (Hug Contents), percentages are not applicable."));
+        return frame;
+    }
+
+    // 4. Calcula a dimensão interna do contêiner (tamanho total menos paddings).
+    const parentInnerSize = isHorizontal 
+        ? node.width - node.paddingLeft - node.paddingRight
+        : node.height - node.paddingTop - node.paddingBottom;
+
+    // Se o tamanho interno for zero ou negativo, não há o que calcular.
+    if (parentInnerSize <= 0) {
+        frame.appendChild(createText("No internal space to calculate proportions."));
+        return frame;
+    }
+    
+    // 5. Itera sobre cada filho para calcular e exibir sua proporção.
+    for (const child of node.children) {
+        if (!('width' in child && 'height' in child)) continue;
+
+        const childSize = isHorizontal ? child.width : child.height;
+        const childSizingMode = isHorizontal ? ('layoutSizingHorizontal' in child ? child.layoutSizingHorizontal : 'FIXED') : ('layoutSizingVertical' in child ? child.layoutSizingVertical : 'FIXED');
+        
+        // Calcula a porcentagem
+        const percentage = (childSize / parentInnerSize) * 100;
+
+        // Formata o modo de dimensionamento para ser mais legível
+        const sizingModeLabel = {
+            'FIXED': 'Fixed',
+            'HUG': 'Hug',
+            'FILL': 'Fill'
+        }[childSizingMode];
+
+        const description = `› ${child.name}: ${percentage.toFixed(1)}% (${sizingModeLabel})`;
+        frame.appendChild(createText(description));
+    }
+
+    return frame;
+}
+
+function findTextNodes(node: SceneNode): TextNode[] {
+    let textNodes: TextNode[] = [];
+    if (node.type === 'TEXT') {
+        textNodes.push(node);
+    }
+    if ('children' in node) {
+        for (const child of node.children) {
+            textNodes = textNodes.concat(findTextNodes(child));
+        }
+    }
+    return textNodes;
+}
+
+/**
+ * Cria um "card" de documentação para um único nó de texto, detalhando suas propriedades.
+ */
+async function createTypographyFrame(textNode: TextNode): Promise<FrameNode> {
+    const frame = figma.createFrame();
+    frame.name = `Typography: ${textNode.name}`;
+    frame.layoutMode = "VERTICAL";
+    frame.primaryAxisSizingMode = "AUTO";
+    frame.counterAxisSizingMode = "AUTO";
+    frame.itemSpacing = 8;
+    frame.paddingTop = 16;
+    frame.paddingBottom = 16;
+    frame.paddingLeft = 16;
+    frame.paddingRight = 16;
+    frame.fills = [];
+
+    const createText = (content: string, isBold = false) => {
+        const text = figma.createText();
+        text.fontName = { family: "Inter", style: isBold ? "Bold" : "Regular" };
+        text.characters = content;
+        text.fontSize = 12;
+        return text;
+    };
+
+    await figma.loadFontAsync(textNode.fontName as FontName);
+
+    frame.appendChild(createText("Typography", true));
+
+    const fontName = textNode.fontName as FontName;
+    frame.appendChild(createText(`Font: ${fontName.family} ${fontName.style}`));
+
+    if (Array.isArray(textNode.fills) && textNode.fills.length > 0 && textNode.fills[0].type === 'SOLID') {
+        const colorInfo = await getColorInfo(textNode.fills[0], textNode.fillStyleId);
+        const label = colorInfo.name ? `${colorInfo.name} (${colorInfo.hex})` : colorInfo.hex;
+        frame.appendChild(createText(`Color: ${label}`));
+    }
+    
+    if (typeof textNode.fontSize === 'number') {
+        frame.appendChild(createText(`Size: ${textNode.fontSize}px`));
+    } else {
+        // Se o fontSize for mixed, também informamos
+        frame.appendChild(createText('Size: Mixed'));
+    }
+
+    // Altura da Linha (Line Height)
+    const lineHeight = textNode.lineHeight;
+    // <-- NOVA VERIFICAÇÃO AQUI
+    if (lineHeight === figma.mixed) {
+        frame.appendChild(createText('Line Height: Mixed'));
+    } else if (lineHeight.unit === 'AUTO') {
+        frame.appendChild(createText('Line Height: Auto'));
+    } else {
+        const value = lineHeight.value.toFixed(lineHeight.unit === 'PIXELS' ? 0 : 2);
+        frame.appendChild(createText(`Line Height: ${value}${lineHeight.unit === 'PIXELS' ? 'px' : '%'}`));
+    }
+    
+    // Espaçamento entre Letras (Letter Spacing)
+    const letterSpacing = textNode.letterSpacing;
+    // <-- E NOVA VERIFICAÇÃO AQUI
+    if (letterSpacing === figma.mixed) {
+        frame.appendChild(createText('Letter Spacing: Mixed'));
+    } else {
+        const lsValue = letterSpacing.value.toFixed(letterSpacing.unit === 'PIXELS' ? 2 : 1);
+        frame.appendChild(createText(`Letter Spacing: ${lsValue}${letterSpacing.unit === 'PIXELS' ? 'px' : '%'}`));
+    }
+
+    // Alinhamento
+    frame.appendChild(createText(`Alignment: ${textNode.textAlignHorizontal} / ${textNode.textAlignVertical}`));
+
+    // Decoração e Capitalização
+    if (textNode.textDecoration !== 'NONE') {
+         frame.appendChild(createText(`Decoration: ${String(textNode.textDecoration)}`));
+    }
+    if (textNode.textCase !== 'ORIGINAL') {
+        frame.appendChild(createText(`Case: ${String(textNode.textCase)}`));
+    }
+
+    return frame;
+}
+
+/**
+ * Encontra todos os estilos de texto únicos em um nó e cria um contêiner com sua documentação.
+ */
+async function createAllTypographyFrames(node: SceneNode): Promise<FrameNode | null> {
+    const textNodes = findTextNodes(node);
+    if (textNodes.length === 0) {
+        return null;
+    }
+
+    // Filtra para documentar apenas estilos de texto únicos
+    const uniqueTextStyles = new Map<string, TextNode>();
+    for (const textNode of textNodes) {
+        // Cria uma "impressão digital" do estilo para identificar duplicatas
+        const styleFingerprint = JSON.stringify({
+            font: textNode.fontName,
+            size: textNode.fontSize,
+            fills: textNode.fills,
+            lineHeight: textNode.lineHeight,
+            letterSpacing: textNode.letterSpacing,
+            textCase: textNode.textCase,
+            textDecoration: textNode.textDecoration
+        });
+        
+        if (!uniqueTextStyles.has(styleFingerprint)) {
+            uniqueTextStyles.set(styleFingerprint, textNode);
+        }
+    }
+
+    if (uniqueTextStyles.size === 0) {
+        return null;
+    }
+
+    // Cria o contêiner principal para todos os cards de tipografia
+    const typographyContainer = figma.createFrame();
+    typographyContainer.name = "Typography";
+    typographyContainer.layoutMode = 'VERTICAL';
+    typographyContainer.primaryAxisSizingMode = 'AUTO';
+    typographyContainer.counterAxisSizingMode = 'AUTO';
+    typographyContainer.itemSpacing = 16;
+    typographyContainer.fills = [];
+
+    // Cria um card de documentação para cada estilo único
+    for (const textNode of uniqueTextStyles.values()) {
+        const typoFrame = await createTypographyFrame(textNode);
+        typographyContainer.appendChild(typoFrame);
+    }
+    
+    return typographyContainer;
 }
 
 function findNestedFramesWithLayout(node: SceneNode): FrameNode[] {
@@ -735,6 +1033,11 @@ async function createNestedFrameDocumentation(nestedFrame: FrameNode): Promise<F
     if (spacingFrame) {
         contentRow.appendChild(spacingFrame);
     }
+
+    const proportionsFrame = await createProportionsFrame(nestedFrame);
+    if (proportionsFrame) {
+        contentRow.appendChild(proportionsFrame);
+    }
     
     const allSvgsFrame = await createAllAssetsSVGFrame(nestedFrame); // Usando a função que criamos antes
     if (allSvgsFrame) {
@@ -799,11 +1102,21 @@ async function createInstancesAndPropertiesSection(componentSet: ComponentSetNod
                 mainVariantRow.appendChild(spacingFrame);
             }
 
+            const proportionsFrame = await createProportionsFrame(variant);
+            if (proportionsFrame) {
+                mainVariantRow.appendChild(proportionsFrame);
+            }
+
             // --- CORREÇÃO APLICADA AQUI ---
             // Chama a nova função que cria um contêiner para TODOS os SVGs
             const allSvgsFrame = await createAllAssetsSVGFrame(variant);
             if (allSvgsFrame) {
                 mainVariantRow.appendChild(allSvgsFrame);
+            }
+
+            const allTypographyFrame = await createAllTypographyFrames(variant);
+            if (allTypographyFrame) {
+                mainVariantRow.appendChild(allTypographyFrame);
             }
             // --- FIM DA CORREÇÃO ---
             
@@ -934,6 +1247,17 @@ async function createDocumentationBox(
         if (spacingFrame) {
             mainSpecsContainer.appendChild(spacingFrame);
         }
+
+        const proportionsFrame = await createProportionsFrame(componentOrSet as ComponentNode);
+        if (proportionsFrame) {
+            mainSpecsContainer.appendChild(proportionsFrame);
+        }
+
+        const allTypographyFrame = await createAllTypographyFrames(componentOrSet);
+        if (allTypographyFrame) {
+            mainSpecsContainer.appendChild(allTypographyFrame);
+        }
+
         rightColumn.appendChild(mainSpecsContainer);
 
         if (makeBox) {
@@ -966,7 +1290,7 @@ async function createDocumentationBox(
 // ===== LÓGICA PRINCIPAL DO PLUGIN =====
 // =================================================================
 
-figma.showUI(__html__, { width: 340, height: 440 });
+figma.showUI(__html__, { width: 340, height: 420 });
 
 function updateSelectionInfo() {
     figma.ui.postMessage({ type: 'selection-info', count: figma.currentPage.selection.length });
