@@ -834,80 +834,95 @@ function findTextNodes(node: SceneNode): TextNode[] {
  * Cria um "card" de documentação para um único nó de texto, detalhando suas propriedades.
  */
 async function createTypographyFrame(textNode: TextNode): Promise<FrameNode> {
-    const frame = figma.createFrame();
-    frame.name = `Typography: ${textNode.name}`;
-    frame.layoutMode = "VERTICAL";
-    frame.primaryAxisSizingMode = "AUTO";
-    frame.counterAxisSizingMode = "AUTO";
-    frame.itemSpacing = 8;
-    frame.paddingTop = 16;
-    frame.paddingBottom = 16;
-    frame.paddingLeft = 16;
-    frame.paddingRight = 16;
-    frame.fills = [];
+  const frame = figma.createFrame();
+  frame.name = `Typography: ${textNode.name}`;
+  frame.layoutMode = "VERTICAL";
+  frame.primaryAxisSizingMode = "AUTO";
+  frame.counterAxisSizingMode = "AUTO";
+  frame.itemSpacing = 8;
+  frame.paddingTop = 16;
+  frame.paddingBottom = 16;
+  frame.paddingLeft = 16;
+  frame.paddingRight = 16;
+  frame.fills = [];
 
-    const createText = (content: string, isBold = false) => {
-        const text = figma.createText();
-        text.fontName = { family: "Inter", style: isBold ? "Bold" : "Regular" };
-        text.characters = content;
-        text.fontSize = 12;
-        return text;
-    };
+  const createText = (content: string, isBold = false) => {
+    const text = figma.createText();
+    text.fontName = { family: "Inter", style: isBold ? "Bold" : "Regular" };
+    text.characters = content;
+    text.fontSize = 12;
+    return text;
+  };
 
-    await figma.loadFontAsync(textNode.fontName as FontName);
+  await figma.loadFontAsync(textNode.fontName as FontName);
 
-    frame.appendChild(createText("Typography", true));
+  // Título da seção
+  frame.appendChild(createText("Typography", true));
 
-    const fontName = textNode.fontName as FontName;
-    frame.appendChild(createText(`Font: ${fontName.family} ${fontName.style}`));
+  // 👉 Prévia do conteúdo do texto (com reticências apenas se > 2 palavras)
+  const words = textNode.characters.trim().split(/\s+/);
+  let previewLabel = "";
 
-    if (Array.isArray(textNode.fills) && textNode.fills.length > 0 && textNode.fills[0].type === 'SOLID') {
-        const colorInfo = await getColorInfo(textNode.fills[0], textNode.fillStyleId);
-        const label = colorInfo.name ? `${colorInfo.name} (${colorInfo.hex})` : colorInfo.hex;
-        frame.appendChild(createText(`Color: ${label}`));
-    }
-    
-    if (typeof textNode.fontSize === 'number') {
-        frame.appendChild(createText(`Size: ${textNode.fontSize}px`));
-    } else {
-        // Se o fontSize for mixed, também informamos
-        frame.appendChild(createText('Size: Mixed'));
-    }
+  if (words.length === 0 || (words.length === 1 && words[0] === "")) {
+    previewLabel = "(empty)";
+  } else if (words.length <= 2) {
+    previewLabel = `“${words.join(" ")}”`;
+  } else {
+    previewLabel = `“${words.slice(0, 2).join(" ")}...”`;
+  }
 
-    // Altura da Linha (Line Height)
-    const lineHeight = textNode.lineHeight;
-    // <-- NOVA VERIFICAÇÃO AQUI
-    if (lineHeight === figma.mixed) {
-        frame.appendChild(createText('Line Height: Mixed'));
-    } else if (lineHeight.unit === 'AUTO') {
-        frame.appendChild(createText('Line Height: Auto'));
-    } else {
-        const value = lineHeight.value.toFixed(lineHeight.unit === 'PIXELS' ? 0 : 2);
-        frame.appendChild(createText(`Line Height: ${value}${lineHeight.unit === 'PIXELS' ? 'px' : '%'}`));
-    }
-    
-    // Espaçamento entre Letras (Letter Spacing)
-    const letterSpacing = textNode.letterSpacing;
-    // <-- E NOVA VERIFICAÇÃO AQUI
-    if (letterSpacing === figma.mixed) {
-        frame.appendChild(createText('Letter Spacing: Mixed'));
-    } else {
-        const lsValue = letterSpacing.value.toFixed(letterSpacing.unit === 'PIXELS' ? 2 : 1);
-        frame.appendChild(createText(`Letter Spacing: ${lsValue}${letterSpacing.unit === 'PIXELS' ? 'px' : '%'}`));
-    }
+  frame.appendChild(createText(`Preview: ${previewLabel}`));
 
-    // Alinhamento
-    frame.appendChild(createText(`Alignment: ${textNode.textAlignHorizontal} / ${textNode.textAlignVertical}`));
+  // Fonte
+  const fontName = textNode.fontName as FontName;
+  frame.appendChild(createText(`Font: ${fontName.family} ${fontName.style}`));
 
-    // Decoração e Capitalização
-    if (textNode.textDecoration !== 'NONE') {
-         frame.appendChild(createText(`Decoration: ${String(textNode.textDecoration)}`));
-    }
-    if (textNode.textCase !== 'ORIGINAL') {
-        frame.appendChild(createText(`Case: ${String(textNode.textCase)}`));
-    }
+  // Cor
+  if (Array.isArray(textNode.fills) && textNode.fills.length > 0 && textNode.fills[0].type === 'SOLID') {
+    const colorInfo = await getColorInfo(textNode.fills[0], textNode.fillStyleId);
+    const label = colorInfo.name ? `${colorInfo.name} (${colorInfo.hex})` : colorInfo.hex;
+    frame.appendChild(createText(`Color: ${label}`));
+  }
 
-    return frame;
+  // Tamanho
+  if (typeof textNode.fontSize === 'number') {
+    frame.appendChild(createText(`Size: ${textNode.fontSize}px`));
+  } else {
+    frame.appendChild(createText('Size: Mixed'));
+  }
+
+  // Line height
+  const lineHeight = textNode.lineHeight;
+  if (lineHeight === figma.mixed) {
+    frame.appendChild(createText('Line Height: Mixed'));
+  } else if (lineHeight.unit === 'AUTO') {
+    frame.appendChild(createText('Line Height: Auto'));
+  } else {
+    const value = lineHeight.value.toFixed(lineHeight.unit === 'PIXELS' ? 0 : 2);
+    frame.appendChild(createText(`Line Height: ${value}${lineHeight.unit === 'PIXELS' ? 'px' : '%'}`));
+  }
+
+  // Letter spacing
+  const letterSpacing = textNode.letterSpacing;
+  if (letterSpacing === figma.mixed) {
+    frame.appendChild(createText('Letter Spacing: Mixed'));
+  } else {
+    const lsValue = letterSpacing.value.toFixed(letterSpacing.unit === 'PIXELS' ? 2 : 1);
+    frame.appendChild(createText(`Letter Spacing: ${lsValue}${letterSpacing.unit === 'PIXELS' ? 'px' : '%'}`));
+  }
+
+  // Alinhamento
+  frame.appendChild(createText(`Alignment: ${textNode.textAlignHorizontal} / ${textNode.textAlignVertical}`));
+
+  // Decoração e Case
+  if (textNode.textDecoration !== 'NONE') {
+    frame.appendChild(createText(`Decoration: ${String(textNode.textDecoration)}`));
+  }
+  if (textNode.textCase !== 'ORIGINAL') {
+    frame.appendChild(createText(`Case: ${String(textNode.textCase)}`));
+  }
+
+  return frame;
 }
 
 /**
