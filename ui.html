@@ -81,6 +81,10 @@
       border: 2px solid var(--primary);
       height: 51px;
     }
+    .btn:disabled{
+      opacity: .5;
+      cursor: not-allowed;
+    }
     .btn svg, .btn span {
       display: block; 
     }
@@ -190,20 +194,51 @@
       }
     });
 
-    $('#btn-create-set').onclick = ()=>{
-      parent.postMessage(getPluginMessage('create-component-set'), '*');
-    };
-    $('#btn-create-master').onclick = ()=>{
-      parent.postMessage(getPluginMessage('create-master-component'), '*');
-    };
+    const btnSet = $('#btn-create-set');
+    const btnMaster = $('#btn-create-master');
+    const btnSetLabel = btnSet.querySelector('span');
+    const btnMasterLabel = btnMaster.querySelector('span');
+
+    let selectionCount = 0;
+    let busy = false;
+
+    // Botões refletem o estado: desabilitados sem seleção suficiente,
+    // e travados em "Generating…" enquanto o plugin processa (evita
+    // cliques repetidos que empilhavam execuções).
+    function refreshButtons(){
+      btnSet.disabled = busy || selectionCount < 2;
+      btnMaster.disabled = busy || selectionCount < 1;
+      btnSetLabel.innerText = busy ? 'Generating…' : 'Create Component Set';
+      btnMasterLabel.innerText = busy ? 'Generating…' : 'Create Master Component';
+    }
+    refreshButtons();
+
+    function send(type){
+      if (busy) return;
+      busy = true;
+      refreshButtons();
+      parent.postMessage(getPluginMessage(type), '*');
+    }
+
+    btnSet.onclick = ()=> send('create-component-set');
+    btnMaster.onclick = ()=> send('create-master-component');
 
     onmessage = (event)=>{
       const msg = event.data.pluginMessage;
       if(!msg) return;
       if(msg.type==='selection-info'){
+        selectionCount = msg.count;
         const info = $('#sel-info');
         info.innerHTML = '';
-        info.append(Object.assign(document.createElement('span'),{className:'chip', innerText: `${msg.count} selected`}));
+        const hint = msg.count < 2 ? `${msg.count} selected — select 2+ for variants` : `${msg.count} selected`;
+        info.append(Object.assign(document.createElement('span'),{className:'chip', innerText: hint}));
+        // Sugere o nome do primeiro objeto selecionado como nome do componente
+        if (msg.firstName) $('#obj-name').placeholder = msg.firstName;
+        refreshButtons();
+      }
+      if(msg.type==='done'){
+        busy = false;
+        refreshButtons();
       }
     };
   </script>
