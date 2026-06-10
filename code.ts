@@ -20,6 +20,121 @@ const CONTAINER_BG_FILL: SolidPaint = { type: 'SOLID', color: { r: 232 / 255, g:
 const LINE_EXTENSION = 6; // Quanto a linha sobressai
 const LABEL_MARGIN = 2; // Distância do rótulo para a linha
 
+// Limites para designs complexos (evita travamentos e documentação infinita)
+const NESTED_DOC_MAX_DEPTH = 2;
+const NESTED_DOC_MAX_COUNT = 12;
+const FINGERPRINT_NODE_BUDGET = 4000;
+
+// Ignora filhos invisíveis de instâncias em todas as travessias (performance)
+figma.skipInvisibleInstanceChildren = true;
+
+
+// =================================================================
+// ===== INFRAESTRUTURA DE ROBUSTEZ =====
+// =================================================================
+
+const FALLBACK_FONT: FontName = { family: "Inter", style: "Regular" };
+
+async function safeLoadFont(font: FontName | typeof figma.mixed): Promise<FontName> {
+    if (font !== figma.mixed) {
+        try {
+            await figma.loadFontAsync(font);
+            return font;
+        } catch (e) {
+            console.warn("Fonte não disponível, usando fallback:", font, e);
+        }
+    }
+    await figma.loadFontAsync(FALLBACK_FONT);
+    return FALLBACK_FONT;
+}
+
+async function loadAllFontsOf(textNode: TextNode): Promise<void> {
+    if (textNode.fontName === figma.mixed) {
+        const fonts = textNode.getRangeAllFontNames(0, textNode.characters.length);
+        for (const font of fonts) await figma.loadFontAsync(font);
+    } else {
+        await figma.loadFontAsync(textNode.fontName);
+    }
+}
+
+/**
+ * Executa uma operação de geração garantindo que, em caso de erro, nenhum nó
+ * órfão fique para trás no canvas. Todo nó criado pelo plugin nasce como filho
+ * da página atual, então basta comparar os filhos da página antes e depois.
+ */
+async function runSafely(label: string, fn: () => Promise<void>): Promise<void> {
+    const before = new Set(figma.currentPage.children.map(node => node.id));
+    try {
+        await fn();
+    } catch (e) {
+        for (const child of [...figma.currentPage.children]) {
+            if (!before.has(child.id)) {
+                try { child.remove(); } catch (_e) { /* já removido com o pai */ }
+            }
+        }
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`Erro ao ${label}:`, e);
+        figma.notify(`❌ Erro ao ${label}: ${message}`, { error: true });
+    } finally {
+        figma.ui.postMessage({ type: 'done' });
+    }
+}
+
+type SelectionBounds = { x: number; y: number; maxX: number; maxY: number };
+
+function getSelectionBounds(nodes: readonly SceneNode[]): SelectionBounds | null {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const node of nodes) {
+        const box = node.absoluteBoundingBox;
+        if (!box) continue;
+        minX = Math.min(minX, box.x);
+        minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.width);
+        maxY = Math.max(maxY, box.y + box.height);
+    }
+    return isFinite(minX) ? { x: minX, y: minY, maxX, maxY } : null;
+}
+
+/**
+ * Posiciona o resultado ao lado direito da seleção original, mantendo o
+ * contexto de onde o usuário está trabalhando. Só move a viewport se o
+ * resultado ficar fora dela (preserva o zoom do usuário).
+ */
+function placeNearSelection(node: FrameNode | ComponentNode | ComponentSetNode, bounds: SelectionBounds | null): void {
+    if (bounds) {
+        node.x = bounds.maxX + 80;
+        node.y = bounds.y;
+    } else {
+        node.x = figma.viewport.center.x - node.width / 2;
+        node.y = figma.viewport.center.y - node.height / 2;
+    }
+    const vb = figma.viewport.bounds;
+    const visible = node.x < vb.x + vb.width && node.x + node.width > vb.x &&
+        node.y < vb.y + vb.height && node.y + node.height > vb.y;
+    if (!visible) {
+        figma.viewport.scrollAndZoomIntoView([node]);
+    }
+}
+
+/**
+ * Reaplica nos text nodes da instância o conteúdo dos textos do nó original.
+ * Usado quando originais com textos diferentes foram unificados numa variante.
+ */
+async function applyTextOverrides(instance: InstanceNode, original: SceneNode): Promise<void> {
+    const instanceTexts = findTextNodes(instance);
+    const originalTexts = findTextNodes(original);
+    if (instanceTexts.length !== originalTexts.length) return;
+    for (let i = 0; i < instanceTexts.length; i++) {
+        if (instanceTexts[i].characters === originalTexts[i].characters) continue;
+        try {
+            await loadAllFontsOf(instanceTexts[i]);
+            instanceTexts[i].characters = originalTexts[i].characters;
+        } catch (e) {
+            console.warn("Não foi possível aplicar override de texto:", e);
+        }
+    }
+}
+
 
 // =================================================================
 // ===== FUNÇÕES AUXILIARES =====
@@ -84,34 +199,82 @@ function minifySVG(svg: string): string {
         .trim();
 }
 
-function isExportableAssetNode(node: SceneNode): boolean {
-    // Um asset exportável não pode ser um componente ou instância, para evitar erros.
-    if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET' || node.type === 'INSTANCE') {
-        return false;
-    }
+// Tipos que são inequivocamente desenho vetorial
+const STRONG_VECTOR_TYPES = new Set<string>(['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON']);
+// Formas simples que compõem ícones, mas que sozinhas não bastam (um retângulo é só um retângulo)
+const WEAK_VECTOR_TYPES = new Set<string>(['LINE', 'ELLIPSE', 'RECTANGLE']);
+
+function hasAssetNameHint(node: SceneNode): boolean {
     const name = node.name.toLowerCase();
-    // Um asset é um nó do tipo VECTOR ou qualquer outro nó cujo nome contenha "icon".
-    return node.type === 'VECTOR' || name.includes('icon');
+    return name.includes('icon') || name.includes('svg') || name.includes('logo') ||
+        name.includes('vector') || name.includes('asset') ||
+        /(^|[^a-z])ic[-_]/.test(name);
+}
+
+function isVectorLeaf(node: SceneNode): boolean {
+    if (STRONG_VECTOR_TYPES.has(node.type)) return true;
+    if (WEAK_VECTOR_TYPES.has(node.type)) {
+        // Formas com imagem/vídeo de fill não são vetoriais
+        const fills = (node as RectangleNode).fills;
+        return !Array.isArray(fills) || fills.every(f => f.type !== 'IMAGE' && f.type !== 'VIDEO');
+    }
+    return false;
+}
+
+function collectVisibleLeaves(node: SceneNode, out: SceneNode[] = []): SceneNode[] {
+    if (!node.visible) return out;
+    if ('children' in node && node.children.length > 0) {
+        for (const child of node.children) collectVisibleLeaves(child, out);
+    } else {
+        out.push(node);
+    }
+    return out;
+}
+
+function isExportableAssetNode(node: SceneNode): boolean {
+    if (!node.visible || node.type === 'COMPONENT_SET') return false;
+
+    // Vetores puros são sempre assets
+    if (STRONG_VECTOR_TYPES.has(node.type)) return true;
+
+    const nameHint = hasAssetNameHint(node);
+
+    // Containers (frames, grupos, instâncias, componentes) contam como um
+    // ícone montado quando todas as folhas visíveis são vetoriais.
+    if ('children' in node && node.children.length > 0) {
+        const leaves = collectVisibleLeaves(node);
+        if (leaves.length === 0) return false;
+        const allVector = leaves.every(isVectorLeaf);
+        const hasStrongVector = leaves.some(leaf => STRONG_VECTOR_TYPES.has(leaf.type));
+        return allVector && (hasStrongVector || nameHint);
+    }
+
+    // Formas simples soltas só contam como asset com dica no nome
+    return nameHint && WEAK_VECTOR_TYPES.has(node.type);
 }
 
 function findExportableAssetNodes(node: SceneNode): SceneNode[] {
-    // Esta função foi ajustada para retornar TODOS os assets encontrados, não apenas o primeiro.
-    
-    function findAllAssets(currentNode: SceneNode): SceneNode[] {
-        let assets: SceneNode[] = [];
+    const assets: SceneNode[] = [];
+    const seenFingerprints = new Set<string>();
+
+    function walk(currentNode: SceneNode): void {
         if (isExportableAssetNode(currentNode)) {
-            assets.push(currentNode);
-        }
-        // Continua a busca nos filhos mesmo que o pai já seja um asset
-        if ('children' in currentNode) {
-            for (const child of currentNode.children) {
-                assets = assets.concat(findAllAssets(child));
+            // Dedupe assets visualmente idênticos (mesmo ícone repetido)
+            const fingerprint = getNodeFingerprint(currentNode);
+            if (!seenFingerprints.has(fingerprint)) {
+                seenFingerprints.add(fingerprint);
+                assets.push(currentNode);
             }
+            // Não desce nos filhos de um asset já identificado (evita SVGs duplicados)
+            return;
         }
-        return assets;
+        if ('children' in currentNode) {
+            for (const child of currentNode.children) walk(child);
+        }
     }
 
-    return findAllAssets(node);
+    walk(node);
+    return assets;
 }
 
 async function createAssetSVGFrame(assetNode: SceneNode): Promise<FrameNode | null> {
@@ -163,7 +326,28 @@ async function createAssetSVGFrame(assetNode: SceneNode): Promise<FrameNode | nu
 
     } catch (err) {
         console.error("Erro ao exportar SVG do asset:", err);
-        return null;
+        // Card de aviso no lugar do asset — falha visível em vez de sumir silenciosamente
+        try {
+            await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+            const errorFrame = figma.createFrame();
+            errorFrame.name = `Export failed: ${assetNode.name}`;
+            errorFrame.layoutMode = "VERTICAL";
+            errorFrame.primaryAxisSizingMode = "AUTO";
+            errorFrame.counterAxisSizingMode = "AUTO";
+            errorFrame.paddingTop = 8;
+            errorFrame.paddingBottom = 8;
+            errorFrame.paddingLeft = 8;
+            errorFrame.paddingRight = 8;
+            errorFrame.fills = [];
+            const errorText = figma.createText();
+            errorText.fontName = { family: "Inter", style: "Regular" };
+            errorText.characters = `⚠️ SVG export failed: ${assetNode.name}`;
+            errorText.fontSize = 12;
+            errorFrame.appendChild(errorText);
+            return errorFrame;
+        } catch (_e) {
+            return null;
+        }
     }
 }
 
@@ -219,9 +403,9 @@ async function createVisualReplica(sourceNode: FrameNode): Promise<FrameNode> {
     const replica = figma.createFrame();
     replica.name = sourceNode.name + " (Visual Replica)";
     replica.resize(sourceNode.width, sourceNode.height);
-    replica.fills = JSON.parse(JSON.stringify(sourceNode.fills));
-    replica.strokes = JSON.parse(JSON.stringify(sourceNode.strokes));
-    replica.strokeWeight = sourceNode.strokeWeight;
+    if (Array.isArray(sourceNode.fills)) replica.fills = JSON.parse(JSON.stringify(sourceNode.fills));
+    if (Array.isArray(sourceNode.strokes)) replica.strokes = JSON.parse(JSON.stringify(sourceNode.strokes));
+    if (sourceNode.strokeWeight !== figma.mixed) replica.strokeWeight = sourceNode.strokeWeight;
     if (sourceNode.cornerRadius !== figma.mixed) {
         replica.cornerRadius = sourceNode.cornerRadius;
     }
@@ -243,32 +427,38 @@ async function createVisualReplica(sourceNode: FrameNode): Promise<FrameNode> {
 
     if (sourceNode.children) {
         for (const child of sourceNode.children) {
-            if (child.type === 'TEXT') {
-                const textChild = child as TextNode;
-                const textReplica = figma.createText();
-                try {
-                    await figma.loadFontAsync(textChild.fontName as FontName);
-                    textReplica.fontName = textChild.fontName;
-                } catch (e) {
-                    console.log("Fonte não encontrada, usando padrão:", e);
-                    await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+            try {
+                if (child.type === 'TEXT') {
+                    const textChild = child as TextNode;
+                    const textReplica = figma.createText();
+                    textReplica.fontName = await safeLoadFont(textChild.fontName);
+                    textReplica.characters = textChild.characters;
+                    if (typeof textChild.fontSize === 'number') textReplica.fontSize = textChild.fontSize;
+                    if (Array.isArray(textChild.fills)) textReplica.fills = JSON.parse(JSON.stringify(textChild.fills));
+                    textReplica.textAlignHorizontal = textChild.textAlignHorizontal;
+                    textReplica.textAlignVertical = textChild.textAlignVertical;
+                    const transform = textChild.relativeTransform;
+                    textReplica.x = transform[0][2];
+                    textReplica.y = transform[1][2];
+                    textReplica.resize(textChild.width, textChild.height);
+                    replica.appendChild(textReplica);
+                } else {
+                    const childClone = child.clone();
+                    const transform = child.relativeTransform;
+                    childClone.x = transform[0][2];
+                    childClone.y = transform[1][2];
+                    replica.appendChild(childClone);
                 }
-                textReplica.characters = textChild.characters;
-                textReplica.fontSize = textChild.fontSize;
-                textReplica.fills = JSON.parse(JSON.stringify(textChild.fills));
-                textReplica.textAlignHorizontal = textChild.textAlignHorizontal;
-                textReplica.textAlignVertical = textChild.textAlignVertical;
-                const transform = textChild.relativeTransform;
-                textReplica.x = transform[0][2];
-                textReplica.y = transform[1][2];
-                textReplica.resize(textChild.width, textChild.height);
-                replica.appendChild(textReplica);
-            } else {
-                const childClone = child.clone();
-                const transform = child.relativeTransform;
-                childClone.x = transform[0][2];
-                childClone.y = transform[1][2];
-                replica.appendChild(childClone);
+            } catch (e) {
+                // Um filho problemático não pode derrubar a réplica inteira:
+                // tenta um clone simples e, se também falhar, pula o filho.
+                console.warn(`Falha ao replicar "${child.name}", usando clone simples:`, e);
+                try {
+                    const fallbackClone = child.clone();
+                    fallbackClone.x = child.relativeTransform[0][2];
+                    fallbackClone.y = child.relativeTransform[1][2];
+                    replica.appendChild(fallbackClone);
+                } catch (_e) { /* filho ignorado */ }
             }
         }
     }
@@ -338,23 +528,91 @@ async function createLabel(value: number, anchor: { x: number, y: number }, type
     return labelGroup;
 }
 
-function getNodeFingerprint(node: SceneNode): string {
+function summarizePaints(paints: ReadonlyArray<Paint> | typeof figma.mixed | undefined): string {
+    if (paints === undefined) return 'none';
+    if (!Array.isArray(paints)) return 'mixed';
+    return paints.map(paint => {
+        if (paint.visible === false) return 'off';
+        if (paint.type === 'SOLID') {
+            return `S${rgbToHex(paint.color.r, paint.color.g, paint.color.b)}:${paint.opacity === undefined ? 1 : paint.opacity}`;
+        }
+        if ('gradientStops' in paint) {
+            const stops = paint.gradientStops
+                .map((stop: ColorStop) => `${rgbToHex(stop.color.r, stop.color.g, stop.color.b)}@${stop.position.toFixed(2)}`)
+                .join(',');
+            return `${paint.type}:${stops}`;
+        }
+        if (paint.type === 'IMAGE') return `IMG:${paint.imageHash || ''}`;
+        return paint.type;
+    }).join('|');
+}
+
+/**
+ * Fingerprint estrutural de um nó. Dois nós com o mesmo fingerprint são
+ * tratados como o mesmo design. Estritamente igual em tudo, EXCETO:
+ * - o conteúdo dos textos (characters) — botões idênticos com labels
+ *   diferentes são o mesmo design;
+ * - dimensões derivadas do texto (text auto-resize e containers com HUG).
+ * Um orçamento de nós visitados evita travamentos em árvores gigantes.
+ */
+function getNodeFingerprint(node: SceneNode, budget?: { left: number }): string {
+    const b = budget || { left: FINGERPRINT_NODE_BUDGET };
+    if (--b.left < 0) return `overflow:${node.id};`;
+
     let fingerprint = `type:${node.type};`;
+
+    if (node.type === 'TEXT') {
+        const font = node.fontName === figma.mixed ? 'mixed' : `${node.fontName.family}/${node.fontName.style}`;
+        const size = node.fontSize === figma.mixed ? 'mixed' : String(node.fontSize);
+        const lineHeight = node.lineHeight === figma.mixed ? 'mixed' : JSON.stringify(node.lineHeight);
+        const letterSpacing = node.letterSpacing === figma.mixed ? 'mixed' : JSON.stringify(node.letterSpacing);
+        const textCase = node.textCase === figma.mixed ? 'mixed' : String(node.textCase);
+        const decoration = node.textDecoration === figma.mixed ? 'mixed' : String(node.textDecoration);
+        fingerprint += `font:${font};fsize:${size};lh:${lineHeight};ls:${letterSpacing};case:${textCase};dec:${decoration};`;
+        fingerprint += `align:${node.textAlignHorizontal}/${node.textAlignVertical};`;
+        fingerprint += `fills:${summarizePaints(node.fills)};`;
+        // Texto com auto-resize tem tamanho derivado do conteúdo — não comparar
+        if (node.textAutoResize === 'NONE') {
+            fingerprint += `size:${node.width.toFixed(0)}x${node.height.toFixed(0)};`;
+        }
+        return fingerprint;
+    }
+
+    if ('fills' in node) fingerprint += `fills:${summarizePaints(node.fills)};`;
+    if ('strokes' in node) {
+        fingerprint += `strokes:${summarizePaints(node.strokes)};`;
+        fingerprint += `sw:${node.strokeWeight === figma.mixed ? 'mixed' : node.strokeWeight};`;
+    }
+    if ('cornerRadius' in node) {
+        fingerprint += `cr:${node.cornerRadius === figma.mixed ? 'mixed' : node.cornerRadius};`;
+    }
+    if ('effects' in node) fingerprint += `fx:${node.effects.length};`;
+
+    if ('layoutMode' in node && node.layoutMode !== 'NONE') {
+        fingerprint += `layout:${node.layoutMode}/${node.primaryAxisAlignItems}/${node.counterAxisAlignItems};`;
+        fingerprint += `gap:${node.itemSpacing};pad:${node.paddingTop}/${node.paddingRight}/${node.paddingBottom}/${node.paddingLeft};`;
+        // Dimensões HUG derivam do conteúdo (ex.: texto) — não comparar
+        const hugH = 'layoutSizingHorizontal' in node && node.layoutSizingHorizontal === 'HUG';
+        const hugV = 'layoutSizingVertical' in node && node.layoutSizingVertical === 'HUG';
+        fingerprint += `size:${hugH ? 'hug' : node.width.toFixed(0)}x${hugV ? 'hug' : node.height.toFixed(0)};`;
+    } else if ('width' in node) {
+        fingerprint += `size:${node.width.toFixed(0)}x${node.height.toFixed(0)};`;
+    }
+
     if ('children' in node) {
         fingerprint += `children:${node.children.length};`;
-        node.children.forEach(child => { fingerprint += getNodeFingerprint(child); });
+        for (const child of node.children) {
+            fingerprint += getNodeFingerprint(child, b);
+        }
     }
-    if ('fills' in node && Array.isArray(node.fills)) fingerprint += `fills:${JSON.stringify(node.fills)};`;
-    if ('strokes' in node && Array.isArray(node.strokes)) fingerprint += `strokes:${JSON.stringify(node.strokes)};`;
-    if ('width' in node) fingerprint += `size:${node.width.toFixed(2)}x${node.height.toFixed(2)};`;
     return fingerprint;
 }
 
 function copyProperties(sourceNode: SceneNode, targetNode: ComponentNode) {
     targetNode.resize(sourceNode.width, sourceNode.height);
-    if ('fills' in sourceNode) targetNode.fills = sourceNode.fills;
-    if ('strokes' in sourceNode) targetNode.strokes = sourceNode.strokes;
-    if ('strokeWeight' in sourceNode) targetNode.strokeWeight = sourceNode.strokeWeight;
+    if ('fills' in sourceNode && Array.isArray(sourceNode.fills)) targetNode.fills = sourceNode.fills;
+    if ('strokes' in sourceNode && Array.isArray(sourceNode.strokes)) targetNode.strokes = sourceNode.strokes;
+    if ('strokeWeight' in sourceNode && sourceNode.strokeWeight !== figma.mixed) targetNode.strokeWeight = sourceNode.strokeWeight;
     if ('effects' in sourceNode) targetNode.effects = sourceNode.effects;
     if ('cornerRadius' in sourceNode && sourceNode.cornerRadius !== figma.mixed && sourceNode.cornerRadius !== undefined) { targetNode.cornerRadius = sourceNode.cornerRadius; }
     if ('layoutMode' in sourceNode && sourceNode.layoutMode !== 'NONE') {
@@ -375,14 +633,8 @@ function copyProperties(sourceNode: SceneNode, targetNode: ComponentNode) {
     if ('blendMode' in sourceNode) targetNode.blendMode = sourceNode.blendMode;
     if ('visible' in sourceNode) targetNode.visible = sourceNode.visible;
     if ('exportSettings' in sourceNode) targetNode.exportSettings = sourceNode.exportSettings;
-    if (sourceNode.type === 'TEXT') {
-        const targetTextNode = targetNode as unknown as TextNode;
-        targetTextNode.textAlignHorizontal = sourceNode.textAlignHorizontal;
-        targetTextNode.textAlignVertical = sourceNode.textAlignVertical;
-        targetTextNode.textAutoResize = sourceNode.textAutoResize;
-        targetTextNode.textCase = sourceNode.textCase;
-        targetTextNode.textDecoration = sourceNode.textDecoration;
-    }
+    // (removido: setar propriedades de TextNode num ComponentNode lança erro —
+    // textos do source viram filhos clonados, que já carregam o próprio estilo)
 }
 
 function rgbToHex(r: number, g: number, b: number): string {
@@ -428,6 +680,34 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
 
     const vizElements: (RectangleNode | LineNode | FrameNode)[] = [];
 
+    // --- ANTI-SOBREPOSIÇÃO DE RÓTULOS ---
+    // Rótulos ancorados no mesmo lado podem colidir (ex.: padding pequeno +
+    // gap vizinho). Quando colidem, o novo rótulo é empurrado para fora.
+    const placedLabels: FrameNode[] = [];
+    const labelsIntersect = (a: FrameNode, b: FrameNode) =>
+        a.x < b.x + b.width + 2 && a.x + a.width + 2 > b.x &&
+        a.y < b.y + b.height + 2 && a.y + a.height + 2 > b.y;
+    const registerLabel = (label: FrameNode, pushDirection: 'left' | 'up') => {
+        let guard = 0;
+        while (placedLabels.some(other => labelsIntersect(label, other)) && guard++ < 20) {
+            if (pushDirection === 'left') label.x -= label.width + 4;
+            else label.y -= label.height + 4;
+        }
+        placedLabels.push(label);
+    };
+
+    // Paddings iguais nos 4 lados ganham um único rótulo (menos poluição visual)
+    const roundedPadding = {
+        top: Math.round(componentPiece.paddingTop),
+        bottom: Math.round(componentPiece.paddingBottom),
+        left: Math.round(componentPiece.paddingLeft),
+        right: Math.round(componentPiece.paddingRight)
+    };
+    const uniformPadding = roundedPadding.top > 0 &&
+        roundedPadding.top === roundedPadding.bottom &&
+        roundedPadding.top === roundedPadding.left &&
+        roundedPadding.top === roundedPadding.right;
+
     // --- FUNÇÕES AUXILIARES REESTRUTURADAS ---
 
 
@@ -465,7 +745,7 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
 
     // --- LÓGICA DE PADDINGS ---
 
-    if (componentPiece.paddingTop > 0) {
+    if (roundedPadding.top > 0) {
         const topBlock = figma.createRectangle();
         topBlock.resize(componentPiece.width, componentPiece.paddingTop);
         topBlock.x = componentPiece.x;
@@ -479,53 +759,63 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
         // A âncora do label para paddings verticais (top/bottom) fica à esquerda
         const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: topBlock.y + topBlock.height / 2 };
         const label = await createLabel(componentPiece.paddingTop, labelAnchor, 'padding', 'left');
+        registerLabel(label, 'left');
         vizElements.push(label);
     }
 
-    if (componentPiece.paddingBottom > 0) {
+    if (roundedPadding.bottom > 0) {
         const bottomBlock = figma.createRectangle();
         bottomBlock.resize(componentPiece.width, componentPiece.paddingBottom);
         bottomBlock.x = componentPiece.x;
         bottomBlock.y = componentPiece.y + componentPiece.height - componentPiece.paddingBottom;
         bottomBlock.fills = [PADDING_FILL];
-        
+
         const line1 = createFullWidthHorizontalLine(bottomBlock.y, PADDING_LINE_STROKE);
         const line2 = createFullWidthHorizontalLine(bottomBlock.y + bottomBlock.height, PADDING_LINE_STROKE);
         vizElements.push(bottomBlock, line1, line2);
-        
-        const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: bottomBlock.y + bottomBlock.height / 2 };
-        const label = await createLabel(componentPiece.paddingBottom, labelAnchor, 'padding', 'left');
-        vizElements.push(label);
+
+        if (!uniformPadding) {
+            const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: bottomBlock.y + bottomBlock.height / 2 };
+            const label = await createLabel(componentPiece.paddingBottom, labelAnchor, 'padding', 'left');
+            registerLabel(label, 'left');
+            vizElements.push(label);
+        }
     }
 
-    if (componentPiece.paddingLeft > 0) {
+    if (roundedPadding.left > 0) {
         const height = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
         const leftBlock = figma.createRectangle();
         leftBlock.resize(componentPiece.paddingLeft, height);
         leftBlock.x = componentPiece.x;
         leftBlock.y = componentPiece.y + componentPiece.paddingTop;
         leftBlock.fills = [PADDING_FILL];
-        
-        vizElements.push(leftBlock, ...createVerticalBoundaryLines(leftBlock, PADDING_LINE_STROKE)); 
-        
-        const labelAnchor = { x: leftBlock.x + leftBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
-        const label = await createLabel(componentPiece.paddingLeft, labelAnchor, 'padding', 'top');
-        vizElements.push(label);
+
+        vizElements.push(leftBlock, ...createVerticalBoundaryLines(leftBlock, PADDING_LINE_STROKE));
+
+        if (!uniformPadding) {
+            const labelAnchor = { x: leftBlock.x + leftBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
+            const label = await createLabel(componentPiece.paddingLeft, labelAnchor, 'padding', 'top');
+            registerLabel(label, 'up');
+            vizElements.push(label);
+        }
     }
 
-    if (componentPiece.paddingRight > 0) {
+    if (roundedPadding.right > 0) {
         const height = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
         const rightBlock = figma.createRectangle();
         rightBlock.resize(componentPiece.paddingRight, height);
         rightBlock.x = componentPiece.x + componentPiece.width - componentPiece.paddingRight;
         rightBlock.y = componentPiece.y + componentPiece.paddingTop;
         rightBlock.fills = [PADDING_FILL];
-        
+
         vizElements.push(rightBlock, ...createVerticalBoundaryLines(rightBlock, PADDING_LINE_STROKE));
-        
-        const labelAnchor = { x: rightBlock.x + rightBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
-        const label = await createLabel(componentPiece.paddingRight, labelAnchor, 'padding', 'top');
-        vizElements.push(label);
+
+        if (!uniformPadding) {
+            const labelAnchor = { x: rightBlock.x + rightBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
+            const label = await createLabel(componentPiece.paddingRight, labelAnchor, 'padding', 'top');
+            registerLabel(label, 'up');
+            vizElements.push(label);
+        }
     }
 
     // --- LÓGICA DE GAPS ---
@@ -554,10 +844,14 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
         }
         
         // Continua apenas se houver um espaçamento real para desenhar
-        if (actualItemSpacing > 0) {
+        if (Math.round(actualItemSpacing) > 0) {
             for (let i = 0; i < componentPiece.children.length - 1; i++) {
                 const currentChild = componentPiece.children[i];
                 if (!('relativeTransform' in currentChild)) continue;
+
+                // Em auto-layout todos os gaps têm o mesmo valor — rotular
+                // só o primeiro evita repetição visual desnecessária.
+                const showLabel = i === 0;
 
                 const gapBlock = figma.createRectangle();
                 gapBlock.fills = [GAP_FILL];
@@ -566,29 +860,33 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
 
                 if (componentPiece.layoutMode === 'HORIZONTAL') { // Gap Vertical
                     const gapHeight = componentPiece.height - componentPiece.paddingTop - componentPiece.paddingBottom;
-                    // USA O VALOR CORRIGIDO
                     gapBlock.resize(actualItemSpacing, gapHeight);
                     gapBlock.x = componentPiece.x + childRelativeX + currentChild.width;
                     gapBlock.y = componentPiece.y + componentPiece.paddingTop;
-                    
-                    const labelAnchor = { x: gapBlock.x + gapBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
-                    // USA O VALOR CORRIGIDO
-                    const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'top');
-                    vizElements.push(gapBlock, ...createVerticalBoundaryLines(gapBlock, GAP_LINE_STROKE), label);
+
+                    vizElements.push(gapBlock, ...createVerticalBoundaryLines(gapBlock, GAP_LINE_STROKE));
+                    if (showLabel) {
+                        const labelAnchor = { x: gapBlock.x + gapBlock.width / 2, y: componentPiece.y - LINE_EXTENSION - LABEL_MARGIN };
+                        const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'top');
+                        registerLabel(label, 'up');
+                        vizElements.push(label);
+                    }
 
                 } else { // layoutMode === 'VERTICAL' -> Gap Horizontal
                     const gapWidth = componentPiece.width - componentPiece.paddingLeft - componentPiece.paddingRight;
-                    // USA O VALOR CORRIGIDO
                     gapBlock.resize(gapWidth, actualItemSpacing);
                     gapBlock.x = componentPiece.x + componentPiece.paddingLeft;
                     gapBlock.y = componentPiece.y + childRelativeY + currentChild.height;
 
                     const line1 = createFullWidthHorizontalLine(gapBlock.y, GAP_LINE_STROKE);
                     const line2 = createFullWidthHorizontalLine(gapBlock.y + gapBlock.height, GAP_LINE_STROKE);
-                    const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: gapBlock.y + gapBlock.height / 2 };
-                    // USA O VALOR CORRIGIDO
-                    const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'left');
-                    vizElements.push(gapBlock, line1, line2, label);
+                    vizElements.push(gapBlock, line1, line2);
+                    if (showLabel) {
+                        const labelAnchor = { x: componentPiece.x - LINE_EXTENSION - LABEL_MARGIN, y: gapBlock.y + gapBlock.height / 2 };
+                        const label = await createLabel(actualItemSpacing, labelAnchor, 'gap', 'left');
+                        registerLabel(label, 'left');
+                        vizElements.push(label);
+                    }
                 }
             }
         }
@@ -598,6 +896,34 @@ async function createLayoutVisualization(node: ComponentNode | FrameNode): Promi
 
     if (vizElements.length > 0) {
         vizElements.forEach(el => vizWrapperFrame.appendChild(el));
+
+        // Expande o wrapper para conter rótulos e linhas que sobressaem —
+        // com clipsContent=false eles aparecem, mas o frame menor que o
+        // conteúdo quebra o auto-layout do box de documentação.
+        const wrapperAbsX = vizWrapperFrame.absoluteTransform[0][2];
+        const wrapperAbsY = vizWrapperFrame.absoluteTransform[1][2];
+        let minX = 0, minY = 0;
+        let maxX = vizWrapperFrame.width, maxY = vizWrapperFrame.height;
+        for (const child of vizWrapperFrame.children) {
+            const box = child.absoluteBoundingBox;
+            if (!box) continue;
+            const relX = box.x - wrapperAbsX;
+            const relY = box.y - wrapperAbsY;
+            minX = Math.min(minX, relX);
+            minY = Math.min(minY, relY);
+            maxX = Math.max(maxX, relX + box.width);
+            maxY = Math.max(maxY, relY + box.height);
+        }
+        if (minX < 0 || minY < 0 || maxX > vizWrapperFrame.width || maxY > vizWrapperFrame.height) {
+            const dx = Math.max(0, -minX);
+            const dy = Math.max(0, -minY);
+            for (const child of vizWrapperFrame.children) {
+                child.x += dx;
+                child.y += dy;
+            }
+            vizWrapperFrame.resize(maxX - minX, maxY - minY);
+        }
+
         return vizWrapperFrame;
     }
 
@@ -975,20 +1301,42 @@ async function createAllTypographyFrames(node: SceneNode): Promise<FrameNode | n
     return typographyContainer;
 }
 
-function findNestedFramesWithLayout(node: SceneNode): FrameNode[] {
+function findNestedFramesWithLayout(node: SceneNode, depth = 1): FrameNode[] {
     let frames: FrameNode[] = [];
-    if ('children' in node) {
-        for (const child of node.children) {
-            if (child.type === 'FRAME' && child.layoutMode !== 'NONE') {
-                frames.push(child);
-            }
-            frames = frames.concat(findNestedFramesWithLayout(child));
+    // Limite de profundidade: documentar TODOS os níveis de um design complexo
+    // explode o box e trava o plugin — os primeiros níveis são os que importam.
+    if (depth > NESTED_DOC_MAX_DEPTH || !('children' in node)) return frames;
+    for (const child of node.children) {
+        if (child.type === 'FRAME' && child.layoutMode !== 'NONE') {
+            frames.push(child);
         }
+        frames = frames.concat(findNestedFramesWithLayout(child, depth + 1));
     }
     return frames;
 }
 
-async function createNestedFrameDocumentation(nestedFrame: FrameNode): Promise<FrameNode> {
+/**
+ * Remove frames com design idêntico (fingerprint estrutural — ignora apenas o
+ * conteúdo dos textos) e aplica o teto de segurança de nested docs.
+ * Retorna cada frame único com a contagem de ocorrências.
+ */
+function dedupeNestedFrames(frames: FrameNode[]): { frame: FrameNode; count: number }[] {
+    const seen = new Map<string, { frame: FrameNode; count: number }>();
+    for (const frame of frames) {
+        const fingerprint = getNodeFingerprint(frame);
+        const entry = seen.get(fingerprint);
+        if (entry) entry.count++;
+        else seen.set(fingerprint, { frame, count: 1 });
+    }
+    const unique = [...seen.values()];
+    if (unique.length > NESTED_DOC_MAX_COUNT) {
+        figma.notify(`ℹ️ ${unique.length - NESTED_DOC_MAX_COUNT} camadas internas omitidas da documentação (limite de ${NESTED_DOC_MAX_COUNT}).`);
+        return unique.slice(0, NESTED_DOC_MAX_COUNT);
+    }
+    return unique;
+}
+
+async function createNestedFrameDocumentation(nestedFrame: FrameNode, occurrences = 1): Promise<FrameNode> {
     const docContainer = figma.createFrame();
     docContainer.name = `Docs for ${nestedFrame.name}`;
     docContainer.layoutMode = 'VERTICAL';
@@ -1000,7 +1348,7 @@ async function createNestedFrameDocumentation(nestedFrame: FrameNode): Promise<F
     await figma.loadFontAsync({ family: "Inter", style: "Bold" });
     const title = figma.createText();
     title.fontName = { family: "Inter", style: "Bold" };
-    title.characters = `Layer: ${nestedFrame.name}`;
+    title.characters = `Layer: ${nestedFrame.name}${occurrences > 1 ? ` ×${occurrences}` : ''}`;
     title.fontSize = 16;
     docContainer.appendChild(title);
 
@@ -1138,15 +1486,15 @@ async function createInstancesAndPropertiesSection(componentSet: ComponentSetNod
             variantContainer.appendChild(mainVariantRow);
             
             if (makeBox) {
-                const nestedFrames = findNestedFramesWithLayout(variant);
+                const nestedFrames = dedupeNestedFrames(findNestedFramesWithLayout(variant));
                 if (nestedFrames.length > 0) {
                     const separator = figma.createRectangle();
                     separator.resize(600, 1);
                     separator.fills = [{ type: 'SOLID', color: { r: 0.8, g: 0.8, b: 0.8 } }];
                     variantContainer.appendChild(separator);
 
-                    for (const nestedFrame of nestedFrames) {
-                        const nestedDoc = await createNestedFrameDocumentation(nestedFrame);
+                    for (const { frame: nestedFrame, count } of nestedFrames) {
+                        const nestedDoc = await createNestedFrameDocumentation(nestedFrame, count);
                         variantContainer.appendChild(nestedDoc);
                     }
                 }
@@ -1280,14 +1628,14 @@ async function createDocumentationBox(
             if (layoutViz) {
                 rightColumn.appendChild(layoutViz);
             }
-            const nestedFrames = findNestedFramesWithLayout(componentOrSet);
+            const nestedFrames = dedupeNestedFrames(findNestedFramesWithLayout(componentOrSet));
             if (nestedFrames.length > 0) {
                  const separator = figma.createRectangle();
                  separator.resize(600, 1);
                  separator.fills = [{ type: 'SOLID', color: { r: 0.8, g: 0.8, b: 0.8 } }];
                  rightColumn.appendChild(separator);
-                 for (const nestedFrame of nestedFrames) {
-                      const nestedDoc = await createNestedFrameDocumentation(nestedFrame);
+                 for (const { frame: nestedFrame, count } of nestedFrames) {
+                      const nestedDoc = await createNestedFrameDocumentation(nestedFrame, count);
                       rightColumn.appendChild(nestedDoc);
                  }
             }
@@ -1295,9 +1643,7 @@ async function createDocumentationBox(
     }
     
     boxDS.appendChild(rightColumn);
-    boxDS.x = figma.viewport.center.x - boxDS.width / 2;
-    boxDS.y = figma.viewport.center.y - boxDS.height / 2;
-
+    // Posicionamento fica a cargo do chamador (placeNearSelection)
     return boxDS;
 }
 
@@ -1308,10 +1654,39 @@ async function createDocumentationBox(
 figma.showUI(__html__, { width: 340, height: 420 });
 
 function updateSelectionInfo() {
-    figma.ui.postMessage({ type: 'selection-info', count: figma.currentPage.selection.length });
+    const selection = figma.currentPage.selection;
+    figma.ui.postMessage({
+        type: 'selection-info',
+        count: selection.length,
+        firstName: selection.length > 0 ? selection[0].name : ''
+    });
 }
 updateSelectionInfo();
 figma.on('selectionchange', updateSelectionInfo);
+
+/**
+ * Cria um componente a partir de um nó. Nós com children têm os filhos
+ * clonados e as propriedades copiadas (comportamento original). Nós sem
+ * children (vetores, boolean operations, formas — ex.: um SVG achatado) são
+ * clonados inteiros para dentro do componente, senão ele ficaria vazio —
+ * nesse caso as fills/strokes ficam só no clone, não no componente.
+ */
+function createComponentFrom(sourceNode: SceneNode, name: string): ComponentNode {
+    const component = figma.createComponent();
+    component.name = name;
+    if ('children' in sourceNode && sourceNode.children.length > 0) {
+        for (const child of sourceNode.children) component.appendChild(child.clone());
+        copyProperties(sourceNode, component);
+    } else {
+        const clone = sourceNode.clone();
+        clone.x = 0;
+        clone.y = 0;
+        component.resize(Math.max(sourceNode.width, 0.01), Math.max(sourceNode.height, 0.01));
+        component.fills = [];
+        component.appendChild(clone);
+    }
+    return component;
+}
 
 figma.ui.onmessage = async (msg) => {
     // --- NOVA LÓGICA PARA REDIMENSIONAR A JANELA ---
@@ -1328,6 +1703,7 @@ figma.ui.onmessage = async (msg) => {
     const selection = figma.currentPage.selection;
     if (selection.length < 1) {
         figma.notify("⚠️ Por favor, selecione pelo menos um objeto.", { error: true });
+        figma.ui.postMessage({ type: 'done' });
         return;
     }
     const componentName = msg.name || selection[0].name;
@@ -1340,42 +1716,46 @@ figma.ui.onmessage = async (msg) => {
     };
 
     if (msg.type === 'create-master-component') {
-        const masterNode = selection[0];
-        const mainComponent = figma.createComponent();
-        if ('children' in masterNode) {
-            for (const child of masterNode.children) mainComponent.appendChild(child.clone());
-        }
-        mainComponent.name = componentName;
-        copyProperties(masterNode, mainComponent);
-        if (msg.makeBox) {
-            // --- PASSANDO OS NOVOS DADOS ---
-            await createDocumentationBox(mainComponent, componentName, msg.makeBox, docData);
-        } else {
-            mainComponent.x = figma.viewport.center.x - mainComponent.width / 2;
-            mainComponent.y = figma.viewport.center.y - mainComponent.height / 2 + 150;
-        }
-        const nodesToReplace = [...selection];
-        for (const originalNode of nodesToReplace) {
-            if (originalNode.removed) continue;
-            const instance = mainComponent.createInstance();
-            const parent = originalNode.parent;
-            if (parent) {
-                const index = parent.children.indexOf(originalNode);
-                instance.x = originalNode.x;
-                instance.y = originalNode.y;
-                parent.insertChild(index, instance);
-                originalNode.remove();
-            }
-        }
-        figma.notify(`✅ Componente "${mainComponent.name}" criado!`);
+        await runSafely('criar o componente', async () => {
+            // Bounds calculados ANTES de remover os originais
+            const selectionBounds = getSelectionBounds(selection);
+            const masterNode = selection[0];
+            const mainComponent = createComponentFrom(masterNode, componentName);
 
+            if (msg.makeBox) {
+                const boxDS = await createDocumentationBox(mainComponent, componentName, msg.makeBox, docData);
+                placeNearSelection(boxDS, selectionBounds);
+            } else {
+                placeNearSelection(mainComponent, selectionBounds);
+            }
+
+            // Substituição roda por último: se algo acima falhar, os originais ficam intactos
+            const nodesToReplace = [...selection];
+            for (const originalNode of nodesToReplace) {
+                if (originalNode.removed) continue;
+                const instance = mainComponent.createInstance();
+                const parent = originalNode.parent;
+                if (parent) {
+                    const index = parent.children.indexOf(originalNode);
+                    instance.x = originalNode.x;
+                    instance.y = originalNode.y;
+                    parent.insertChild(index, instance);
+                    await applyTextOverrides(instance, originalNode);
+                    originalNode.remove();
+                }
+            }
+            figma.notify(`✅ Componente "${mainComponent.name}" criado!`);
+        });
     }
 
     if (msg.type === 'create-component-set') {
         if (selection.length < 2) {
             figma.notify("⚠️ Selecione pelo menos dois objetos para um component set.", { error: true });
+            figma.ui.postMessage({ type: 'done' });
             return;
         }
+        // Agrupamento por fingerprint estrutural: objetos estritamente iguais
+        // exceto pelo texto caem no mesmo grupo (1 variante única).
         const groups = new Map<string, SceneNode[]>();
         selection.forEach(node => {
             const fingerprint = getNodeFingerprint(node);
@@ -1384,57 +1764,61 @@ figma.ui.onmessage = async (msg) => {
         });
         if (groups.size < 2) {
             figma.notify("⚠️ Você precisa de pelo menos dois tipos de objetos diferentes para criar variantes.", { error: true });
+            figma.ui.postMessage({ type: 'done' });
             return;
         }
-        const variantComponents: ComponentNode[] = [];
-        const nodeToVariantMap = new Map<string, ComponentNode>();
-        let variantIndex = 1;
-        for (const [, nodes] of groups.entries()) {
-            const representativeNode = nodes[0];
-            const newComponent = figma.createComponent();
-            if ('children' in representativeNode) {
-                for (const child of representativeNode.children) newComponent.appendChild(child.clone());
+        await runSafely('criar o component set', async () => {
+            const selectionBounds = getSelectionBounds(selection);
+            const variantComponents: ComponentNode[] = [];
+            const nodeToVariantMap = new Map<string, ComponentNode>();
+            let variantIndex = 1;
+            for (const [, nodes] of groups.entries()) {
+                const representativeNode = nodes[0];
+                const variantName = msg.useLayerName ? `Type=${representativeNode.name}` : `Variant=${variantIndex++}`;
+                const newComponent = createComponentFrom(representativeNode, variantName);
+                variantComponents.push(newComponent);
+                nodes.forEach(node => nodeToVariantMap.set(node.id, newComponent));
             }
-            newComponent.name = msg.useLayerName ? `Type=${representativeNode.name}` : `Variant=${variantIndex++}`;
-            copyProperties(representativeNode, newComponent);
-            variantComponents.push(newComponent);
-            nodes.forEach(node => nodeToVariantMap.set(node.id, newComponent));
-        }
-        const componentSet = figma.combineAsVariants(variantComponents, figma.currentPage);
-        componentSet.name = componentName;
-        componentSet.layoutMode = "VERTICAL";
-        componentSet.itemSpacing = 24;
-        componentSet.paddingTop = 24;
-        componentSet.paddingRight = 24;
-        componentSet.paddingBottom = 24;
-        componentSet.paddingLeft = 24;
-        componentSet.primaryAxisSizingMode = 'AUTO';
-        componentSet.counterAxisSizingMode = 'AUTO';
-        componentSet.counterAxisAlignItems = 'CENTER';
-        componentSet.fills = [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 }, opacity: 0.001 }];
-        if (msg.makeBox) {
-            // --- PASSANDO OS NOVOS DADOS ---
-            await createDocumentationBox(componentSet, componentName, msg.makeBox, docData);
-        } else {
-            componentSet.x = figma.viewport.center.x - componentSet.width / 2;
-            componentSet.y = figma.viewport.center.y - componentSet.height / 2 + 150;
-        }
-        for (const originalNode of selection) {
-            if (originalNode.removed) continue;
-            const variantComponent = nodeToVariantMap.get(originalNode.id);
-            if (variantComponent) {
-                const instance = variantComponent.createInstance();
-                const parent = originalNode.parent;
-                if (parent) {
-                    const index = parent.children.indexOf(originalNode);
-                    instance.x = originalNode.x;
-                    instance.y = originalNode.y;
-                    parent.insertChild(index, instance);
-                    originalNode.remove();
+            const componentSet = figma.combineAsVariants(variantComponents, figma.currentPage);
+            componentSet.name = componentName;
+            componentSet.layoutMode = "VERTICAL";
+            componentSet.itemSpacing = 24;
+            componentSet.paddingTop = 24;
+            componentSet.paddingRight = 24;
+            componentSet.paddingBottom = 24;
+            componentSet.paddingLeft = 24;
+            componentSet.primaryAxisSizingMode = 'AUTO';
+            componentSet.counterAxisSizingMode = 'AUTO';
+            componentSet.counterAxisAlignItems = 'CENTER';
+            componentSet.fills = [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 }, opacity: 0.001 }];
+
+            if (msg.makeBox) {
+                const boxDS = await createDocumentationBox(componentSet, componentName, msg.makeBox, docData);
+                placeNearSelection(boxDS, selectionBounds);
+            } else {
+                placeNearSelection(componentSet, selectionBounds);
+            }
+
+            // Substituição roda por último: se algo acima falhar, os originais ficam intactos
+            for (const originalNode of selection) {
+                if (originalNode.removed) continue;
+                const variantComponent = nodeToVariantMap.get(originalNode.id);
+                if (variantComponent) {
+                    const instance = variantComponent.createInstance();
+                    const parent = originalNode.parent;
+                    if (parent) {
+                        const index = parent.children.indexOf(originalNode);
+                        instance.x = originalNode.x;
+                        instance.y = originalNode.y;
+                        parent.insertChild(index, instance);
+                        // Originais unificados na mesma variante mantêm o próprio texto
+                        await applyTextOverrides(instance, originalNode);
+                        originalNode.remove();
+                    }
                 }
             }
-        }
-        figma.notify(`✅ Component Set "${componentSet.name}" criado com ${groups.size} variantes!`);
+            figma.notify(`✅ Component Set "${componentSet.name}" criado com ${groups.size} variantes!`);
+        });
     }
 };
 
